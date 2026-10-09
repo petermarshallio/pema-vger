@@ -107,6 +107,33 @@ If you *do* want to try installing FlashAttention on Windows, make sure all of t
 pip install ninja packaging
 ```
 
+### Optional: Apple Silicon engine (MLX)
+
+On an Apple Silicon Mac, [mlx-audio](https://github.com/Blaizzy/mlx-audio) runs
+the same models on the Mac's GPU, much faster than CPU mode. Once it's installed,
+Settings offers **Apple Silicon (MLX)** as a device, and it's the default when
+CUDA isn't available.
+
+`qwen-tts` pins `transformers==4.57.3`, and `mlx-audio` declares
+`transformers>=5.14`, so install `mlx-audio` without its dependencies, then add
+the ones it actually needs:
+
+```bash
+pip install --no-deps mlx-audio
+pip install "mlx>=0.31.1" "miniaudio>=1.61"
+```
+
+pip reports the `transformers` and `huggingface_hub` conflicts; both engines work
+with the versions `qwen-tts` installs. On MLX:
+
+- Models are the mlx-community bfloat16 conversions, so the dtype setting doesn't
+  apply.
+- A cast voice is its reference clip and transcript (`local/{name}/reference.*`);
+  no `.pt` file is made. A voice made on CPU or CUDA before reference clips were
+  kept has only a `.pt` file, so recreate it to use it on MLX.
+- The Advanced section's subtalker settings have no MLX equivalent and are
+  ignored.
+
 ### Optional: Build an executable (PyInstaller)
 
 If you want to package the app into an `.exe`, install build requirements and then run PyInstaller.

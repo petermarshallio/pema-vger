@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import re
 import shutil
@@ -76,6 +77,17 @@ MODEL_REPOS_CUSTOM_VOICE = {
 }
 # VoiceDesign has no 0.6B release yet per the model card's own table, and isn't wired
 # up in this app at all yet (see TODO.md) — not offered as a size choice.
+
+# Apple Silicon engine: mlx-audio runs the same models, converted for MLX, on the
+# Mac's GPU. Optional, and installed without its declared dependencies (see README).
+MLX_AVAILABLE = importlib.util.find_spec("mlx_audio") is not None
+
+
+def mlx_repo_for(model_repo):
+    """The mlx-community bf16 conversion of a Qwen3-TTS repo, e.g.
+    `Qwen/Qwen3-TTS-12Hz-1.7B-Base` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16`."""
+    return f"mlx-community/{model_repo.split('/', 1)[1]}-bf16"
+
 
 # Explicit dtype choices for Configure — CPU always forces float32 regardless (see
 # get_model_config), so these only take effect when actually running on CUDA.
@@ -170,14 +182,18 @@ VOICE_DESIGN_REFERENCE_TEXT = TRAINING_SCRIPTS["Standard (~18s)"]
 
 
 def list_custom_voices():
-    """Voice names available in the local cache (OUTPUT_DIR/*.pt)."""
+    """Voice names available in the local cache: a PyTorch voice file
+    (OUTPUT_DIR/{name}.pt), a reference clip (OUTPUT_DIR/{name}/reference.*), or
+    both."""
     if not os.path.isdir(OUTPUT_DIR):
         return []
-    return sorted(
-        os.path.splitext(f)[0]
-        for f in os.listdir(OUTPUT_DIR)
-        if f.lower().endswith(".pt")
-    )
+    names = set()
+    for f in os.listdir(OUTPUT_DIR):
+        if f.lower().endswith(".pt"):
+            names.add(os.path.splitext(f)[0])
+        elif load_voice_reference(f) is not None:
+            names.add(f)
+    return sorted(names)
 
 
 def list_voice_recordings(voice_name):
@@ -219,6 +235,122 @@ def save_voice_reference(voice_name, ref_audio, ref_text):
         shutil.copyfile(ref_audio, os.path.join(voice_dir, f"reference{ext}"))
     with open(os.path.join(voice_dir, "reference.txt"), "w", encoding="utf-8") as f:
         f.write(ref_text or "")
+
+
+def load_voice_reference(voice_name):
+    """The clip and transcript `voice_name` was cloned from, as saved by
+    `save_voice_reference`.
+
+    Returns:
+        A `(audio_path, transcript)` tuple, or None if the voice has no reference
+        clip. The transcript is None for a quick clone saved without one.
+    """
+    voice_dir = os.path.join(OUTPUT_DIR, voice_name)
+    text_file = os.path.join(voice_dir, "reference.txt")
+    if not os.path.isfile(text_file):
+        return None
+    audio = [
+        f
+        for f in os.listdir(voice_dir)
+        if f.startswith("reference.") and f != "reference.txt"
+    ]
+    if not audio:
+        return None
+    with open(text_file, encoding="utf-8") as f:
+        transcript = f.read().strip() or None
+    return os.path.join(voice_dir, audio[0]), transcript
+
+
+class MlxQwenTTS:
+    """A Qwen3-TTS model on mlx-audio, behind the subset of `Qwen3TTSModel`'s
+    interface this app calls: `generate_custom_voice`, `generate_voice_clone`,
+    `generate_voice_design` and `create_voice_clone_prompt`.
+
+    Cloned voices are passed as `(audio_path, transcript)` references from
+    `load_voice_reference`, where the PyTorch engine takes VoiceClonePromptItems.
+    """
+
+    # Advanced-section settings mlx-audio accepts, by this app's name; the rest
+    # (the subtalker_* settings) have no MLX equivalent and are dropped.
+    _ADVANCED: ClassVar[dict[str, str]] = {
+        "temperature": "temperature",
+        "top_k": "top_k",
+        "top_p": "top_p",
+        "repetition_penalty": "repetition_penalty",
+        "max_new_tokens": "max_tokens",
+    }
+
+    def __init__(self, model_repo):
+        from mlx_audio.tts.utils import load_model
+
+        self.model = load_model(mlx_repo_for(model_repo))
+
+    def _advanced(self, kwargs):
+        return {
+            mlx: kwargs[ours] for ours, mlx in self._ADVANCED.items() if ours in kwargs
+        }
+
+    def _audio(self, results):
+        return np.concatenate([np.array(r.audio, dtype=np.float32) for r in results])
+
+    def _batch(self, text, *others):
+        """Pair each text with its per-item values; a single value applies to all."""
+        texts = text if isinstance(text, list) else [text]
+        columns = [
+            other if isinstance(other, list) else [other] * len(texts)
+            for other in others
+        ]
+        return list(zip(texts, *columns, strict=True))
+
+    def generate_custom_voice(
+        self, text, speaker, language="Auto", instruct=None, **kwargs
+    ):
+        adv = self._advanced(kwargs)
+        wavs = [
+            self._audio(
+                self.model.generate_custom_voice(
+                    text=t,
+                    speaker=s,
+                    language=language,
+                    instruct=i or None,
+                    **adv,
+                )
+            )
+            for t, s, i in self._batch(text, speaker, instruct)
+        ]
+        return wavs, self.model.sample_rate
+
+    def generate_voice_clone(
+        self, text, language="Auto", voice_clone_prompt=None, **kwargs
+    ):
+        adv = self._advanced(kwargs)
+        references = voice_clone_prompt or []
+        if len(references) == 1:
+            references = references[0]
+        wavs = [
+            self._audio(
+                self.model.generate(
+                    text=t,
+                    ref_audio=ref[0],
+                    ref_text=ref[1],
+                    lang_code=language,
+                    **adv,
+                )
+            )
+            for t, ref in self._batch(text, references)
+        ]
+        return wavs, self.model.sample_rate
+
+    def generate_voice_design(self, text, instruct, language="Auto"):
+        audio = self._audio(
+            self.model.generate_voice_design(
+                text=text, instruct=instruct, language=language
+            )
+        )
+        return [audio], self.model.sample_rate
+
+    def create_voice_clone_prompt(self, ref_audio, ref_text, x_vector_only_mode):
+        """No-op: on MLX, the saved reference clip is the voice."""
 
 
 def build_voice_lookup():
@@ -703,7 +835,13 @@ class QwenTTSGUI:
             ImageTk.PhotoImage(frame) for frame in _build_spinner_icons(THEME_FG)
         ]
 
-        self.device_type = tk.StringVar(value="cuda")
+        if torch.cuda.is_available():
+            default_device = "cuda"
+        elif MLX_AVAILABLE:
+            default_device = "mlx"
+        else:
+            default_device = "cpu"
+        self.device_type = tk.StringVar(value=default_device)
         default_dtype = "bfloat16" if torch.cuda.is_available() else "float32"
         self.train_model_size = tk.StringVar(value="1.7B")
         self.train_dtype = tk.StringVar(value=default_dtype)
@@ -1386,13 +1524,19 @@ class QwenTTSGUI:
         ttk.Radiobutton(
             device_frame, text="CPU", variable=self.device_type, value="cpu"
         ).pack(side=tk.LEFT, padx=10)
+        if MLX_AVAILABLE:
+            ttk.Radiobutton(
+                device_frame,
+                text="Apple Silicon (MLX)",
+                variable=self.device_type,
+                value="mlx",
+            ).pack(side=tk.LEFT, padx=10)
 
         if not torch.cuda.is_available():
             # Disabled rather than left selectable-but-warned: picking CUDA when
             # it's not there just re-triggers the same "falling back to CPU"
             # dialog on every model load.
             cuda_radio.config(state=tk.DISABLED)
-            self.device_type.set("cpu")
             ttk.Label(
                 device_frame,
                 text="(CUDA not available on this machine)",
@@ -1454,18 +1598,19 @@ class QwenTTSGUI:
             ).pack(side=tk.LEFT, padx=10)
         ttk.Label(
             frame,
-            text="dtype only applies when running on CUDA — CPU always uses float32.",
+            text="dtype only applies on CUDA: CPU always uses float32, MLX bfloat16.",
             foreground="gray",
         ).pack(anchor=tk.W, pady=(5, 0))
         self._dtype_controls.append((dtype_frame, dtype_var))
 
     def _update_dtype_availability(self):
         """Enable dtype radios only on CUDA; force float32 on CPU so the displayed
-        value always matches what get_model_config will actually use."""
-        cuda_selected = self.device_type.get() == "cuda"
+        value always matches what get_model_config will actually use. MLX ignores
+        the setting (its models are bfloat16 conversions)."""
+        device = self.device_type.get()
         for dtype_frame, dtype_var in self._dtype_controls:
-            self._set_frame_enabled(dtype_frame, cuda_selected)
-            if not cuda_selected:
+            self._set_frame_enabled(dtype_frame, device == "cuda")
+            if device == "cpu":
                 dtype_var.set("float32")
 
     # --- Top bar: wordmark, script import, settings. ---
@@ -2081,15 +2226,18 @@ class QwenTTSGUI:
 
         Args:
             model_repo: HuggingFace repo id to load.
-            device_type: "cuda" or "cpu".
+            device_type: "cuda", "cpu" or "mlx".
             dtype: A torch dtype, passed through to `get_model_config`.
             show_warning: Passed through to `get_model_config`.
             status_label: If given, updated with a fallback message on retry.
 
         Returns:
             A (model, effective_device_type) tuple — `effective_device_type` is
-            "cpu" if a CUDA compatibility error forced a fallback.
+            "cpu" if a CUDA compatibility error forced a fallback. On "mlx", the
+            model is an `MlxQwenTTS`.
         """
+        if device_type == "mlx":
+            return MlxQwenTTS(model_repo), "mlx"
         config = self.get_model_config(device_type, dtype, show_warning=show_warning)
         try:
             return Qwen3TTSModel.from_pretrained(model_repo, **config), device_type
@@ -2198,7 +2346,8 @@ class QwenTTSGUI:
         """Build and save a VoiceClonePromptItem for `voice_name` (background thread).
 
         Args:
-            voice_name: Name to save the trained voice under (OUTPUT_DIR/{voice_name}.pt).
+            voice_name: Name to save the trained voice under (OUTPUT_DIR/{voice_name}.pt,
+                or on MLX its reference clip alone, in OUTPUT_DIR/{voice_name}/).
             method: "file" (audio_file_entry + transcript_entry), "record"
                 (recording_path + script_text), or "design" (design_instruct +
                 script_text — synthesizes a reference clip with VoiceDesign first,
@@ -2375,7 +2524,14 @@ class QwenTTSGUI:
             # Voices always live in the local cache (OUTPUT_DIR) — that's what makes
             # the voice picker's cache scan work.
             output_file = os.path.join(OUTPUT_DIR, f"{voice_name}.pt")
-            torch.save(prompt_items, output_file)
+            if device_type == "mlx":
+                # MLX keeps only the reference clip; a .pt left from an earlier
+                # version of this voice would no longer match it.
+                if os.path.exists(output_file):
+                    os.remove(output_file)
+                output_file = os.path.join(OUTPUT_DIR, voice_name)
+            else:
+                torch.save(prompt_items, output_file)
             # Before any rename cleanup: a recorded reference may still sit in the
             # old name's folder.
             save_voice_reference(voice_name, ref_audio, ref_text)
@@ -2510,23 +2666,38 @@ class QwenTTSGUI:
         return steps
 
     def _load_voice_clone_prompt(self, key, device_type):
-        """Load a trained custom voice's VoiceClonePromptItem.
+        """Load a trained custom voice for `device_type`'s engine.
 
         Args:
-            key: Voice name; read from OUTPUT_DIR/{key}.pt.
-            device_type: "cuda" or "cpu" — where the tensors should end up.
+            key: Voice name; read from OUTPUT_DIR/{key}.pt, or on "mlx" from its
+                reference clip (OUTPUT_DIR/{key}/reference.*).
+            device_type: "cuda", "cpu" or "mlx" — where the voice will be used.
 
         Returns:
             The VoiceClonePromptItem (train_voice always saves a single-item list,
-            since ref_audio there is always a single reference recording).
+            since ref_audio there is always a single reference recording), or on
+            "mlx" an `(audio_path, transcript)` reference.
 
         Raises:
-            FileNotFoundError: If OUTPUT_DIR/{key}.pt doesn't exist.
-            Exception: If the file exists but can't be unpickled.
+            FileNotFoundError: If the voice has nothing the engine can use.
+            Exception: If the .pt file exists but can't be unpickled.
         """
+        if device_type == "mlx":
+            reference = load_voice_reference(key)
+            if reference is None:
+                raise FileNotFoundError(
+                    f"Voice '{key}' has no reference clip, so it can't be used on "
+                    "Apple Silicon (MLX). Recreate it with MLX selected, or switch "
+                    "Device to CPU in Settings."
+                )
+            return reference
+
         voice_file = os.path.join(OUTPUT_DIR, f"{key}.pt")
         if not os.path.exists(voice_file):
-            raise FileNotFoundError(f"Voice file not found: {voice_file}")
+            raise FileNotFoundError(
+                f"Voice file not found: {voice_file}. A voice created on Apple "
+                "Silicon (MLX) has no .pt file; switch Device to MLX to use it."
+            )
 
         # torch.load with weights_only (the safe default since PyTorch 2.6) needs
         # VoiceClonePromptItem allowlisted, since it's not a builtin type.
