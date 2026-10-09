@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sets up a local .venv for Qwen3-TTS-GUI on macOS/Linux.
+# Sets up a local .venv for pema-vger on macOS/Linux.
 # Linux/Windows CUDA users: this installs CPU-only torch by default. See the
 # README's "Install PyTorch for your machine" section to swap in a CUDA wheel.
 # Intel macOS: torch is pinned to the last version with an x86_64 macOS wheel.

@@ -1,6 +1,6 @@
-# Qwen3-TTS-GUI
+# pema-vger
 
-An intuitive GUI app for Qwen3's TTS model
+A voice generator: an intuitive GUI app for Qwen3's TTS model
 
 ## Features
 
@@ -39,7 +39,7 @@ This project is a local Python app (tkinter GUI) that uses `qwen-tts` + PyTorch.
 
 ```bash
 git clone <REPO_URL>
-cd Qwen3-TTS-GUI
+cd pema-vger
 ```
 
 1. Create and activate a virtual environment (recommended).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Activates .venv and runs Qwen3-TTS-GUI. Run ./setup.sh first if .venv doesn't exist yet.
+# Activates .venv and runs pema-vger. Run ./setup.sh first if .venv doesn't exist yet.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
