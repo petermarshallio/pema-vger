@@ -216,6 +216,9 @@ python src/qwen_tts_gui.py
 - Flash Attention 2 will be used automatically if available, otherwise falls back to SDPA
 - CPU mode uses float32 precision and eager attention implementation
 - GPU mode uses bfloat16 precision for better performance
+- Voices stay on your machine: each actor's voice file (`local/{name}.pt`), its
+  recordings, and the reference clip and transcript it was cloned from
+  (`local/{name}/reference.*`) are all in `local/`, which git ignores
 
 This readme and the comments in the code were created with the assistance of AI
 

@@ -191,8 +191,34 @@ def list_voice_recordings(voice_name):
     return sorted(
         os.path.join(voice_dir, f)
         for f in os.listdir(voice_dir)
-        if f.lower().endswith(".wav")
+        if f.lower().startswith("mic_") and f.lower().endswith(".wav")
     )
+
+
+def save_voice_reference(voice_name, ref_audio, ref_text):
+    """Keep the clip and transcript a voice was cloned from, beside its recordings
+    (OUTPUT_DIR/{voice_name}/reference.* and reference.txt), so the voice can be
+    cloned again without its .pt file.
+
+    Args:
+        voice_name: The voice the reference belongs to.
+        ref_audio: A path to an audio file, or a `(samples, sample_rate)` tuple
+            for a synthesized clip.
+        ref_text: The clip's transcript; empty for a quick clone without one.
+    """
+    voice_dir = os.path.join(OUTPUT_DIR, voice_name)
+    os.makedirs(voice_dir, exist_ok=True)
+    for f in os.listdir(voice_dir):
+        if f.startswith("reference."):
+            os.remove(os.path.join(voice_dir, f))
+    if isinstance(ref_audio, tuple):
+        samples, sr = ref_audio
+        sf.write(os.path.join(voice_dir, "reference.wav"), samples, sr)
+    else:
+        ext = os.path.splitext(ref_audio)[1].lower() or ".wav"
+        shutil.copyfile(ref_audio, os.path.join(voice_dir, f"reference{ext}"))
+    with open(os.path.join(voice_dir, "reference.txt"), "w", encoding="utf-8") as f:
+        f.write(ref_text or "")
 
 
 def build_voice_lookup():
@@ -2350,6 +2376,9 @@ class QwenTTSGUI:
             # the voice picker's cache scan work.
             output_file = os.path.join(OUTPUT_DIR, f"{voice_name}.pt")
             torch.save(prompt_items, output_file)
+            # Before any rename cleanup: a recorded reference may still sit in the
+            # old name's folder.
+            save_voice_reference(voice_name, ref_audio, ref_text)
             if renaming_from is not None:
                 self._delete_voice_files(renaming_from)
             self.root.after(0, lambda i=step: panel.complete_step(i))
