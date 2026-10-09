@@ -218,3 +218,9 @@ python src/qwen_tts_gui.py
 - GPU mode uses bfloat16 precision for better performance
 
 This readme and the comments in the code were created with the assistance of AI
+
+## Credits
+
+This project started as a fork of
+[StroepWafel/Qwen3-TTS-GUI](https://github.com/StroepWafel/Qwen3-TTS-GUI) in
+January 2026.
